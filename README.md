@@ -39,17 +39,17 @@ The Nifty 100 Financial Intelligence Platform ingests ~12 years of historical fi
 
 | Stream | Focus | Approx. Effort Split |
 |---|---|---|
-| Data Engineering | MySQL dump → ETL → PostgreSQL star schema | 35% |
+| Data Engineering | Source data → ETL → PostgreSQL star schema | 35% |
 | Power BI Analytics | 7 dashboards, 25+ DAX measures | 40% |
 | Django Web App & API | Public site + channel partner API | 25% |
 
 ## Architecture
 
 ```
-MySQL/MariaDB SQL Dump (source)
+Source data (Excel / SQL dump)
         │
         ▼
-  Python ETL (pandas, regex parsing, cleaning, derived metrics)
+  Python ETL (pandas, cleaning, derived metrics)
         │
         ▼
   PostgreSQL — Star Schema Data Warehouse
@@ -84,21 +84,19 @@ MySQL/MariaDB SQL Dump (source)
 ```
 nifty100-platform/
 ├── etl/
-│   ├── 01_extract_from_mysql.py
+│   ├── 01_extract_from_excel.py
 │   ├── 02_clean_and_transform.py
 │   ├── 03_load_to_warehouse.py
-│   └── schema.sql
+│   └── 04_fix_nan_scores.py
 ├── data/
-│   ├── raw/
-│   ├── clean/
-│   └── sector_mapping.csv
+│   ├── source/                 # original Excel files
+│   ├── raw/                    # extracted CSVs
+│   └── clean/                  # cleaned CSVs, sector_mapping.csv, chart images
 ├── notebooks/
-│   ├── 01_eda.ipynb
+│   ├── 01_exploratory_analysis.ipynb
 │   ├── 02_health_scoring.ipynb
 │   ├── 03_anomaly_detection.ipynb
-│   ├── 04_sector_clustering.ipynb
-│   ├── 05_peer_comparison.ipynb
-│   └── 06_trend_forecasting.ipynb
+│   └── 04_sector_clustering.ipynb
 ├── powerbi/
 │   ├── 01_executive_overview.pbix
 │   ├── 02_company_deep_dive.pbix
@@ -106,29 +104,41 @@ nifty100-platform/
 │   ├── 04_health_scorecard.pbix
 │   ├── 05_growth_analytics.pbix
 │   ├── 06_debt_leverage.pbix
-│   └── 07_dividend_returns.pbix
-├── bluestock/                  # Django project
-│   ├── companies/
-│   ├── ml_engine/
+│   ├── 07_dividend_returns.pbix
+│   └── B100_Bloomberg_Theme_v2.json
+├── django_app/                 # Django project
+│   ├── core/                   # settings, urls, celery, wsgi/asgi
+│   ├── accounts/
+│   ├── admin_insights/
+│   ├── api/
 │   ├── api_management/
+│   ├── companies/
 │   ├── dashboard/
-│   └── accounts/
-├── tests/
+│   ├── ml_engine/
+│   ├── templates/
+│   ├── Dockerfile
+│   ├── manage.py
+│   └── requirements.txt
+├── check_counts.py
+├── check_nan.py
+├── test_db.py
+├── test_db2.py
 ├── docker-compose.yml
-├── requirements.txt
-├── .env.example
+├── pytest.ini
 └── README.md
 ```
 
 ## Data Pipeline (ETL)
 
-Source data: a MariaDB/MySQL SQL dump containing 7 tables — `companies`, `analysis`, `balancesheet`, `profitandloss`, `cashflow`, `prosandcons`, `documents` — covering ~12 years per company across 100 Nifty 100 constituents.
+Source data: 7 tables — `companies`, `analysis`, `balancesheet`, `profitandloss`, `cashflow`, `prosandcons`, `documents` — covering ~12 years per company across 100 Nifty 100 constituents.
 
-**`01_extract_from_mysql.py`** — Regex-parses `INSERT INTO` statements directly from the SQL dump (no live MySQL instance required), handling escaped quotes and `NULL` tokens, and writes one clean CSV per table to `data/raw/`.
+**`01_extract_from_excel.py`** — Reads the source Excel workbooks in `data/source/` and writes one raw CSV per table to `data/raw/`.
 
-**`02_clean_and_transform.py`** — Standardizes inconsistent year formats (`Mar-24`, `Mar 2024`, `TTM`) into a single `MMM YYYY` convention with derived `fiscal_year` and `sort_order` fields; parses free-text growth strings (e.g. `"10 Years: 11%"`) into structured `period` / `value_pct` columns; manually maps all 100 companies to sectors; computes derived financial metrics (debt-to-equity, net profit margin, free cash flow, interest coverage, and others).
+**`02_clean_and_transform.py`** — Standardizes inconsistent year formats (`Mar-24`, `Mar 2024`, `TTM`) into a single `MMM YYYY` convention with derived `fiscal_year` and `sort_order` fields; parses free-text growth strings (e.g. `"10 Years: 11%"`) into structured `period` / `value_pct` columns; manually maps all 100 companies to sectors; computes derived financial metrics (debt-to-equity, net profit margin, free cash flow, interest coverage, and others). Output goes to `data/clean/`.
 
 **`03_load_to_warehouse.py`** — Loads dimension tables first, then fact tables with FK references, using `ON CONFLICT DO UPDATE` upserts so the pipeline is safely re-runnable. Runs post-load row-count verification and data quality checks.
+
+**`04_fix_nan_scores.py`** — Post-load fix-up script that repairs NaN values in the computed score columns.
 
 ## Data Warehouse — Star Schema
 
@@ -142,7 +152,7 @@ Key design decisions:
 
 ## Power BI Dashboards
 
-Seven dashboards, all connected live to PostgreSQL, sharing a unified visual design system (color-coded for good/warning/bad, consistent typography, consistent footer disclaimer):
+Seven dashboards, all connected live to PostgreSQL, sharing a unified visual design system (color-coded for good/warning/bad, consistent typography, consistent footer disclaimer). The shared theme is in `powerbi/B100_Bloomberg_Theme_v2.json`.
 
 | # | Dashboard | Audience | Pages |
 |---|---|---|---|
@@ -184,7 +194,7 @@ Scheduled refresh of scoring and anomaly detection is handled via **Celery + Cel
 
 **Company detail page charts (8):** revenue & profit trend, balance sheet composition, cash flow waterfall, EPS & dividend history, debt vs. equity, CAGR radar, margin trend, and a health-score gauge — all rendered with Chart.js, fed by a dedicated `/api/v1/companies/{symbol}/charts/` endpoint, with Redis caching (60-minute TTL) on the most-requested financial data responses.
 
-Apps: `companies`, `ml_engine`, `api_management`, `dashboard`, `accounts` (JWT auth, admin/permissions).
+Apps: `accounts` (JWT auth, permissions), `admin_insights` (admin monitoring pages), `api`, `api_management`, `companies`, `dashboard`, `ml_engine`.
 
 ## Channel Partner API
 
@@ -229,28 +239,32 @@ Signatures are verified server-side using `secrets.compare_digest()` to prevent 
 
 ```bash
 # Clone the repository
-git clone https://github.com/muhammedfahim438-ctrl/nifty100-platform.git
+git clone https://github.com/Sreekuttan33714/nifty100-platform.git
 cd nifty100-platform
 
 # Environment
-cp .env.example .env   # fill in SECRET_KEY, DATABASE_URL, REDIS_URL, etc.
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
+pip install -r django_app/requirements.txt
+
+# Create a .env file in django_app/ with SECRET_KEY, DATABASE_URL, REDIS_URL, etc.
 
 # Data pipeline
-python etl/01_extract_from_mysql.py
+python etl/01_extract_from_excel.py
 python etl/02_clean_and_transform.py
 python etl/03_load_to_warehouse.py
+python etl/04_fix_nan_scores.py
 
 # Django
+cd django_app
 python manage.py migrate
 python manage.py runserver
 
-# Background tasks
-celery -A bluestock worker -l info
-celery -A bluestock beat -l info
+# Background tasks (from django_app/)
+celery -A core worker -l info
+celery -A core beat -l info
 
-# Or run the full stack
+# Or run the full stack (from the repository root)
 docker-compose up --build
 ```
 
@@ -272,7 +286,7 @@ Test coverage target: 75%+, including dedicated tests for HMAC authentication (v
 In the interest of giving an accurate technical picture rather than an idealized one:
 
 - The health scoring engine is rule-based, not a trained/validated ML model — see the methodology note above.
-- Regex-based SQL dump parsing is a pragmatic one-time ETL approach rather than a production-grade ingestion method, and is sensitive to malformed or unusual source rows.
+- Source-data parsing is a pragmatic one-time ETL approach rather than a production-grade ingestion method, and is sensitive to malformed or unusual source rows.
 - ARIMA forecasts are not currently backtested against a holdout period, so no accuracy metric (e.g. MAPE) is reported for the forecasting notebook.
 - For banking and NBFC companies (HDFCBANK, AXISBANK, BANKBARODA, BAJFINANCE, BAJAJFINSV), the `borrowings` field includes customer deposits, so D/E ratios for these companies are not directly comparable to non-financial companies — this is called out in the dashboards but is a structural limitation of the source data, not something ETL can fully normalize.
 
@@ -280,7 +294,7 @@ In the interest of giving an accurate technical picture rather than an idealized
 
 **Muhammed Fahim**
 Built solo as part of the Bluestock Fintech Data Analytics Internship.
-GitHub: [github.com/muhammedfahim438-ctrl/nifty100-platform](https://github.com/muhammedfahim438-ctrl/nifty100-platform)
+GitHub: [Sreekuttan33714](https://github.com/Sreekuttan33714)
 
 ---
 
